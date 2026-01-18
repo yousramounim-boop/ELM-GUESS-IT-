@@ -4,26 +4,38 @@ import Browser
 import Html exposing (Html, button, div, h1, p, text)
 import Html.Events exposing (onClick)
 
+main : Program () Model Msg
 main =
-  Browser.sandbox { init = 0, update = update, view = view }
+    Browser.element
+        { init = init
+        , update = update
+        , view = view
+        , subscriptions = subscriptions
+        }
+-- MODEL
+type alias Model =
+    { word : String
+    , guess : String
+    }
 
+    -- INIT
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { word = "hardly", guess = "" }, Cmd.none )
+    
 type Msg
   = Increment
   | Decrement
 
+update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-  case msg of
-    Increment ->
-      model + 1
-
-    Decrement ->
-      model - 1
+    ( model, Cmd.none )
 
 view model =
     div []
         [ h1 [] [ text "Guess it!" ]
         , p [] [ text "Jeu de devinettes en Elm" ]
         , button [ onClick Decrement ] [ text "-" ]
-        , div [] [ text (String.fromInt model) ]
+        , p [] [ text ("Mot secret (test) : " ++ model.word) ]
         , button [ onClick Increment ] [ text "+" ]
         ]
