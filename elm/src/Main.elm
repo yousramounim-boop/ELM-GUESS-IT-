@@ -2,7 +2,7 @@ module Main exposing (main)
 
 import Browser
 import Html exposing (Html, button, div, h1, input, label, li, ol, p, span, text, ul)
-import Html.Attributes exposing (checked, disabled, name, style, type_, value)
+import Html.Attributes exposing (checked, style, type_, value)
 import Html.Events exposing (on, onCheck, onClick, onInput)
 import Http
 import Json.Decode as Decode
@@ -23,7 +23,6 @@ main =
         }
 
 
-
 -- MODEL
 
 
@@ -38,10 +37,10 @@ type alias Model =
     , visibleParts : List Part
     , score : Int
     , bestScore : Int
-    , round : Int
-    , roundSize : Int
-    , turnsLeft : Int
+    , lives : Int
     , feedback : Maybe Feedback
+    , hasTried : Bool
+
     }
 
 
@@ -91,12 +90,10 @@ initialModel =
     , visibleParts = []
     , score = 0
     , bestScore = 0
-    , round = 1
-    , roundSize = 10
-    , turnsLeft = 10
+    , lives = 5 
     , feedback = Nothing
+    , hasTried = False
     }
-
 
 
 -- MSG
@@ -112,11 +109,9 @@ type Msg
     | NextRound
     | SetMode Mode
     | GotExpertPick Int
-
-
+    | Replay
 
 -- UPDATE
-
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
@@ -127,15 +122,20 @@ update msg model =
         ToggleShow b ->
             if b then
                 ( { model | showWord = True, revealed = True }, Cmd.none )
-
             else
                 ( { model | showWord = False }, Cmd.none )
 
         SubmitGuess ->
-            handleSubmit model
+            if isGameFinished model then
+                ( model, Cmd.none )
+            else
+                handleSubmit model
 
         SkipWord ->
-            handleSkip model
+            if isGameFinished model then 
+                ( model, Cmd.none )
+            else
+                handleSkip model
 
         NextRound ->
             startNextRound model
@@ -150,134 +150,162 @@ update msg model =
             ( { model | visibleParts = pickOneDefinition i model.parts }, Cmd.none )
 
         SetMode m ->
-            -- Mode change is allowed only if unlocked
-            if isModeUnlocked m model.round then
+            if isModeUnlocked m model.score then
                 let
+                    -- calculer les parties visibles selon le mode choisi
                     ( visible, cmd ) =
                         setVisibleFromMode m model.parts
-                in
-                ( { model | mode = m, visibleParts = visible }, cmd )
 
+                    -- mettre à jour le modèle avec le nouveau mode
+                    m1 =
+                        { model | mode = m, visibleParts = visible }
+                in
+                -- passer directement au prochain mot si le mode est débloqué
+                startNextRound m1
             else
                 ( model, Cmd.none )
 
+        Replay ->
+            -- réinitialiser le jeu mais conserver le meilleur score
+            let
+                m1 =
+                    { initialModel
+                        | bestScore = model.bestScore
+                        , lives = 5
+                        , score = 0
+                        , feedback = Nothing
+                        , hasTried = False
+                    }
+            in
+            ( m1, startRoundCmd m1 )
 
 
--- UPDATE HELPERS (short & clean)
 
+
+-- UPDATE HELPERS
 
 handleSubmit : Model -> ( Model, Cmd Msg )
 handleSubmit model =
-    if model.turnsLeft <= 0 then
-        ( { model | feedback = Just (Info "Round over. Click Next Round!") }, Cmd.none )
+    -- bloqué si game over ou victoire
+    if isGameFinished model then
+        ( model, Cmd.none )
 
     else if String.trim model.guess == "" then
         ( { model | feedback = Just (Info "Type something, then press Enter!") }, Cmd.none )
 
     else
         let
-            correct =
-                isCorrect model
-
-            helpUsed =
-                model.revealed
-
-            turnsLeft2 =
-                model.turnsLeft - 1
+            correct = isCorrect model
+            helpUsed = model.revealed
+            hasTriedNow = True
         in
         if correct then
-            handleCorrect helpUsed turnsLeft2 model
-
+            handleCorrect helpUsed model
         else
-            handleWrong turnsLeft2 model
+            -- mauvaise réponse
+            let
+                m1 =
+                    { model
+                        | lives = model.lives - 1
+                        , feedback = Just (Bad "Try again!")
+                        , hasTried = hasTriedNow
+                    }
+            in
+            ( m1, Cmd.none )
 
 
-handleCorrect : Bool -> Int -> Model -> ( Model, Cmd Msg )
-handleCorrect helpUsed turnsLeft2 model =
+
+-- HANDLE CORRECT (score-based)
+
+
+handleCorrect : Bool -> Model -> ( Model, Cmd Msg )
+handleCorrect helpUsed model =
     let
-        ( score2, fb ) =
+        -- calcul du nouveau score et vies
+        ( score2, lives2, fb ) =
             if helpUsed then
-                ( model.score, Good "DID YOU TRY TO CHEAT? You used “show it” so no point !" )
-
+                ( model.score
+                , model.lives - 1
+                , Good "DID YOU TRY TO CHEAT? You lost a life, FOCUS!"
+                )
             else
-                ( model.score + 1, Good "Right answer! Nice!" )
+                ( model.score + 1
+                , model.lives
+                , Good "Right answer! Nice!"
+                )
 
+        -- passage de niveau immédiat selon score
+        newMode =
+            modeFromScore score2
+
+        -- mise à jour visibleParts selon le nouveau mode après une bonne réponse 
+        (visibleParts2, _) =
+            setVisibleFromMode newMode model.parts
+
+        -- modèle mis à jour
         m1 =
-            model
-                |> setScore score2
-                |> setTurns turnsLeft2
-                |> setFeedback (Just fb)
-                |> updateBestScore
-                |> resetForNextWord
+            { model
+                | score = score2
+                , lives = lives2
+                , feedback = Just fb
+                , mode = newMode
+                , visibleParts = visibleParts2
+                , hasTried = False
+            }
+            |> updateBestScore 
     in
-    if turnsLeft2 == 0 then
-        ( { m1 | feedback = Just (Info "🏁 Round finished! Click Next Round!") }, Cmd.none )
-
+    if score2 >= 20 then
+        -- victoire immédiate
+        ( { m1 | feedback = Just (Info "🎉 Victory! You reached 20 points!"), lives = 0 }
+        , Cmd.none
+        )
     else
-        ( m1, randomWordCmd )
-
-
-handleWrong : Int -> Model -> ( Model, Cmd Msg )
-handleWrong turnsLeft2 model =
-    let
-        m1 =
-            model
-                |> setTurns turnsLeft2
-                |> setFeedback (Just (Bad "Try again!"))
-    in
-    if turnsLeft2 == 0 then
-        ( { m1 | feedback = Just (Info "Round finished! Click Next Round!") }, Cmd.none )
-
-    else
-        ( m1, Cmd.none )
+        -- continuer normalement avec mot suivant
+        ( resetForNextWord m1, randomWordCmd )
 
 
 handleSkip : Model -> ( Model, Cmd Msg )
 handleSkip model =
-    if model.turnsLeft <= 0 then
-        ( { model | feedback = Just (Info "Round over. Click Next Round!") }, Cmd.none )
+    -- si Game Over ou victoire → bloquer skip
+    if model.lives <= 0 then
+        ( { model | feedback = Just (Info "Game Over! Cannot skip.") }, Cmd.none )
+
+    else if model.score >= 20 then
+        ( { model | feedback = Just (Info "You already won, congrats!") }, Cmd.none )
 
     else
         let
-            turnsLeft2 =
-                model.turnsLeft - 1
-
+            newLives =
+                if model.hasTried then
+                    model.lives        -- si déjà tenté, pas de cœur en moins
+                else
+                    model.lives - 1    -- sinon on enlève un cœur
             m1 =
                 model
-                    |> setTurns turnsLeft2
-                    |> setFeedback (Just (Bad "Skipped! Counts as wrong."))
-                    |> resetForNextWord
-        in
-        if turnsLeft2 == 0 then
-            ( { m1 | feedback = Just (Info "Round finished! Click Next Round!") }, Cmd.none )
-
-        else
-            ( m1, randomWordCmd )
-
-
-startNextRound : Model -> ( Model, Cmd Msg )
-startNextRound model =
-    if model.round >= 3 then
-        ( { model | feedback = Just (Info "Game finished! Great job!") }, Cmd.none )
-
-    else
-        let
-            newRound =
-                model.round + 1
-
-            newMode =
-                modeForRound newRound
-
-            m1 =
-                { model
-                    | round = newRound
-                    , mode = newMode
-                    , turnsLeft = model.roundSize
-                    , feedback = Just (Info ("Round " ++ String.fromInt newRound ++ " unlocked!"))
-                }
+                    |> setLives newLives
+                    |> setFeedback (Just (Bad "Skipped!"))
                     |> resetForNextWord
         in
         ( m1, randomWordCmd )
+
+
+setLives : Int -> Model -> Model
+setLives l model =
+    { model | lives = max 0 l }  -- pas de vies négatives
+
+
+-- START NEXT ROUND (score-based)
+
+startNextRound : Model -> ( Model, Cmd Msg )
+startNextRound model =
+    if model.lives <= 0 then
+        ( { model | feedback = Just (Info "You have no lives left! Game Over!") }, Cmd.none )
+
+    else if model.score >= 20 then
+        ( { model | feedback = Just (Info ("You won! Final score: " ++ String.fromInt model.score)) }, Cmd.none )
+
+    else
+        ( resetForNextWord model, randomWordCmd )
 
 
 handleGotRandomIndex : Int -> Model -> ( Model, Cmd Msg )
@@ -310,23 +338,12 @@ handleGotDefinitions result model =
             ( { model | parts = parts, visibleParts = visible, status = Success }, cmd )
 
         Err _ ->
-            ( { model | parts = [], visibleParts = [], status = Failure "No definition found" }
-            , Cmd.none
-            )
+            -- Tirer automatiquement un nouveau mot
+            ( model, randomWordCmd )
 
 
 
 -- PURE MODEL HELPERS
-
-
-setScore : Int -> Model -> Model
-setScore s model =
-    { model | score = s }
-
-
-setTurns : Int -> Model -> Model
-setTurns t model =
-    { model | turnsLeft = t }
 
 
 setFeedback : Maybe Feedback -> Model -> Model
@@ -348,37 +365,33 @@ resetForNextWord model =
         , status = Loading
         , parts = []
         , visibleParts = []
+        , hasTried = False
       }
 
+isGameFinished : Model -> Bool
+isGameFinished model =
+    model.lives <= 0 || model.score >= 20
 
-
--- ROUND / MODE RULES
-
-
-modeForRound : Int -> Mode
-modeForRound r =
-    if r <= 1 then
-        Beginner
-
-    else if r == 2 then
-        Medium
-
-    else
-        Expert
-
+-- ROUND / MODE RULES pour les scores
 
 isModeUnlocked : Mode -> Int -> Bool
-isModeUnlocked m round =
-    case ( m, round ) of
-        ( Beginner, _ ) ->
-            True
+isModeUnlocked m score =
+    case m of
+        Beginner ->
+            score < 5  -- facile accessible seulement avant score 5
+        Medium ->
+            score >= 5 && score < 10  -- moyen accessible entre 5 et 9
+        Expert  -> 
+            score >= 10  -- Expert débloqué entre 10 et 19
 
-        ( Medium, r ) ->
-            r >= 2
-
-        ( Expert, r ) ->
-            r >= 3
-
+modeFromScore : Int -> Mode
+modeFromScore score =
+    if score < 5 then
+        Beginner
+    else if score < 10 then
+        Medium
+    else
+        Expert
 
 
 -- COMMANDS
@@ -428,7 +441,7 @@ pickWord i =
 
 -- DEFINITIONS MODE LOGIC
 
-
+-- Détermine quelles définitions sont visibles selon le mode : Beginner/Medium/Expert
 setVisibleFromMode : Mode -> List Part -> ( List Part, Cmd Msg )
 setVisibleFromMode mode parts =
     case mode of
@@ -494,18 +507,21 @@ subscriptions _ =
 view : Model -> Html Msg
 view model =
     div [ style "font-family" "system-ui", style "padding" "18px", style "max-width" "720px", style "margin" "0 auto" ]
-        [ h1 [ style "margin" "0 0 12px 0" ] [ text (titleText model) ]
-        , viewTopBar model
-        , viewModeSelector model
-        , viewCard
-            [ viewStatus model.status
-            , viewFeedback model.feedback
-            , viewMeaningsBlock model
-            , viewGuessInput model
-            , viewActions model
+        (if isGameFinished model then 
+            [ viewGameEnd model ]
+         else
+            [ h1 [ style "margin" "0 0 12px 0" ] [ text (titleText model) ]
+            , viewTopBar model
+            , viewModeSelector model
+            , viewCard
+                [ viewStatus model.status
+                , viewFeedback model.feedback
+                , viewMeaningsBlock model
+                , viewGuessInput model
+                , viewActions model
+                ]
             ]
-        , viewGameEnd model
-        ]
+        )
 
 
 viewCard : List (Html Msg) -> Html Msg
@@ -529,12 +545,13 @@ titleText model =
 
 viewTopBar : Model -> Html Msg
 viewTopBar model =
-    div [ style "display" "flex", style "gap" "10px", style "flex-wrap" "wrap", style "margin" "8px 0 14px 0" ]
-        [ badge "#e7f0ff" ("🟦 Score: " ++ String.fromInt model.score)
-        , badge "#f1e7ff" ("🟪 Best: " ++ String.fromInt model.bestScore)
-        , badge "#fff3d6" ("🟧 Round " ++ String.fromInt model.round ++ "/3 — Turns: " ++ String.fromInt model.turnsLeft)
+    div [ style "display" "flex", style "gap" "10px", style "flex-wrap" "wrap", style "margin" "8px 0 14px 0", style "justify-content" "space-between" ]
+        [ div []
+            [ badge "#e7f0ff" ("🟦 Score: " ++ String.fromInt model.score)
+            , badge "#f1e7ff" ("🟪 Best: " ++ String.fromInt model.bestScore)
+          ]
+        , div [] (List.map (\_ -> text "❤️") (List.range 1 model.lives))
         ]
-
 
 badge : String -> String -> Html Msg
 badge bg txt =
@@ -548,12 +565,14 @@ badge bg txt =
         [ text txt ]
 
 
+-- VIEW MODE SELECTOR (score-based)
+
 viewModeSelector : Model -> Html Msg
 viewModeSelector model =
     div [ style "display" "flex", style "gap" "10px", style "margin" "0 0 12px 0", style "align-items" "center" ]
-        [ levelChip "Beginner" Beginner True model.mode
-        , levelChip "Medium" Medium (isModeUnlocked Medium model.round) model.mode
-        , levelChip "Expert" Expert (isModeUnlocked Expert model.round) model.mode
+        [ levelChip "Beginner" Beginner (isModeUnlocked Beginner model.score) model.mode
+        , levelChip "Medium" Medium (isModeUnlocked Medium model.score) model.mode
+        , levelChip "Expert" Expert (isModeUnlocked Expert model.score) model.mode
         ]
 
 
@@ -664,7 +683,6 @@ viewGuessInput model =
             , value model.guess
             , onInput GuessChanged
             , onEnter SubmitGuess
-            , disabled (model.turnsLeft <= 0)
             , style "width" "100%"
             , style "padding" "10px"
             , style "border-radius" "10px"
@@ -679,28 +697,15 @@ viewActions model =
     div [ style "display" "flex", style "gap" "10px", style "align-items" "center", style "flex-wrap" "wrap" ]
         [ button
             [ onClick SkipWord
-            , disabled (model.turnsLeft <= 0)
             , style "border" "0"
             , style "padding" "10px 12px"
             , style "border-radius" "12px"
             , style "background" "#ffecec"
             , style "font-weight" "700"
             ]
-            [ text "Skip (counts wrong)" ]
+            [ text "Skip" ]
         , viewShowIt model
-        , if model.turnsLeft == 0 && model.round < 3 then
-            button
-                [ onClick NextRound
-                , style "border" "0"
-                , style "padding" "10px 12px"
-                , style "border-radius" "12px"
-                , style "background" "#eef3ff"
-                , style "font-weight" "800"
                 ]
-                [ text "Next Round" ]
-          else
-            text ""
-        ]
 
 
 viewShowIt : Model -> Html Msg
@@ -710,7 +715,6 @@ viewShowIt model =
             [ type_ "checkbox"
             , checked model.showWord
             , onCheck ToggleShow
-            , disabled (model.turnsLeft <= 0)
             ]
             []
         , text "Show it"
@@ -719,12 +723,65 @@ viewShowIt model =
 
 viewGameEnd : Model -> Html Msg
 viewGameEnd model =
-    if model.round == 3 && model.turnsLeft == 0 then
-        div [ style "margin" "14px 0", style "padding" "12px", style "border-radius" "14px", style "background" "#f1e7ff", style "font-weight" "800" ]
-            [ text ("🎉 Game finished! Final score: " ++ String.fromInt model.score ++ " — Best: " ++ String.fromInt model.bestScore) ]
+    if model.score >= 20 then
+        -- VICTOIRE à 20 points
+        div
+            [ style "margin" "40px 0"
+            , style "padding" "30px"
+            , style "border-radius" "16px"
+            , style "background" "#d9ffea"
+            , style "text-align" "center"
+            , style "font-size" "36px"
+            , style "font-weight" "900"
+            , style "color" "#0a7f3f"
+            ]
+            [ text "CONGRATULATIONS!"
+            , div [ style "margin-top" "20px" ]
+                [ button
+                    [ onClick Replay
+                    , style "padding" "12px 20px"
+                    , style "border-radius" "12px"
+                    , style "border" "0"
+                    , style "background" "#f1e7ff"
+                    , style "font-weight" "700"
+                    , style "cursor" "pointer"
+                    , style "font-size" "18px"
+                    ]
+                    [ text "Replay" ]
+                ]
+            ]
+
+    else if model.lives <= 0 then
+        -- GAME OVER
+        div 
+            [ style "margin" "40px 0"
+            , style "padding" "30px"
+            , style "border-radius" "16px"
+            , style "background" "#ffecec"
+            , style "text-align" "center"
+            , style "font-size" "28px"
+            , style "font-weight" "800"
+            , style "color" "#a10f0f"
+            ]
+            [ text ("Game over! Final score: " ++ String.fromInt model.score ++ " — Best: " ++ String.fromInt model.bestScore)
+            , div [ style "margin-top" "20px" ]
+                [ button 
+                    [ onClick Replay
+                    , style "padding" "12px 20px"
+                    , style "border-radius" "12px"
+                    , style "border" "0"
+                    , style "background" "#d9ffea"
+                    , style "font-weight" "700"
+                    , style "cursor" "pointer"
+                    , style "font-size" "18px"
+                    ]
+                    [ text "Replay" ]
+                ]
+            ]
 
     else
         text ""
+
 
 
 viewPart : Part -> Html Msg
@@ -799,4 +856,3 @@ meaningDecoder =
 definitionDecoder : Decode.Decoder String
 definitionDecoder =
     Decode.field "definition" Decode.string
-
